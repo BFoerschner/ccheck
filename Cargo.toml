@@ -1,0 +1,12 @@
+[package]
+license = "MIT"
+description = "CLI that verifies the presence of commands inside containers."
+repository = "https://github.com/bfoerschner/ccheck"
+name = "ccheck"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5.41", features = ["derive"] }
+anyhow = "1.0.98"
+colored = "3.0.0"
