@@ -1,0 +1,159 @@
+name: Release
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: "Force release"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      new_release_published: ${{ steps.semantic.outputs.new_release_published || github.event.inputs.force_release == 'true' }}
+      new_release_version: ${{ steps.semantic.outputs.new_release_version || steps.get_current_version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get current version from Cargo.toml
+        id: get_current_version
+        if: github.event.inputs.force_release == 'true'
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Semantic Release
+        uses: cycjimmy/semantic-release-action@v4
+        id: semantic
+        with:
+          semantic_version: 23
+          extra_plugins: |
+            @semantic-release/changelog@6.0.3
+            @semantic-release/git@10.0.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Cargo.toml version
+        if: steps.semantic.outputs.new_release_published == 'true'
+        run: |
+          VERSION="${{ steps.semantic.outputs.new_release_version }}"
+          sed -i "s/version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add Cargo.toml
+          git commit -m "chore: update Cargo.toml version to $VERSION [skip ci]" || exit 0
+          git push
+
+      - name: Create manual release
+        if: github.event.inputs.force_release == 'true' && steps.semantic.outputs.new_release_published != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.get_current_version.outputs.version }}
+          name: Release v${{ steps.get_current_version.outputs.version }}
+          body: Manual release triggered via workflow dispatch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    name: Build and Upload Assets
+    needs: release
+    if: needs.release.outputs.new_release_published == 'true' || github.event.inputs.force_release == 'true'
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: ccheck
+            asset_name: ccheck-linux-amd64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: ccheck
+            asset_name: ccheck-linux-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: ccheck.exe
+            asset_name: ccheck-windows-amd64.exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            artifact_name: ccheck.exe
+            asset_name: ccheck-windows-arm64.exe
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: ccheck
+            asset_name: ccheck-macos-amd64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: ccheck
+            asset_name: ccheck-macos-arm64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation dependencies (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Configure Cargo for cross-compilation
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml << EOF
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Rename artifact
+        run: |
+          mkdir -p artifacts
+          cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} artifacts/${{ matrix.asset_name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: artifacts/${{ matrix.asset_name }}
+
+  upload-release:
+    name: Upload Release Assets
+    needs: [release, build]
+    if: needs.release.outputs.new_release_published == 'true' || github.event.inputs.force_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.release.outputs.new_release_version }}
+          files: artifacts/**/ccheck-*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
