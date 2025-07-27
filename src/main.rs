@@ -2,7 +2,7 @@ use clap::Parser;
 use colored::*;
 use std::{
     fs,
-    process::{Command, Output},
+    process::{self, Command, Output},
 };
 
 #[derive(Parser)]
@@ -35,7 +35,10 @@ fn main() {
 
     match docker_script_output {
         Ok(output) => handle_docker_output(output),
-        Err(err) => panic!("Failed to run Docker script: {err}"),
+        Err(err) => {
+            eprintln!("Failed to run Docker script: {err}");
+            process::exit(1);
+        }
     }
 }
 
@@ -52,7 +55,10 @@ fn parse_commands(command_file_path: Option<String>, args_commands: Vec<String>)
     match command_file_path {
         Some(path) => match fs::read_to_string(path) {
             Ok(contents) => create_commands_string(contents),
-            Err(err) => panic!("Failed to read file: {err}"),
+            Err(err) => {
+                eprintln!("Failed to read file: {err}");
+                process::exit(1);
+            }
         },
         None => args_commands,
     }
@@ -68,10 +74,11 @@ fn create_commands_string(contents: String) -> Vec<String> {
 
 fn handle_docker_output(docker_script_output: Output) {
     if !docker_script_output.status.success() {
-        panic!(
+        eprintln!(
             "Docker script failed with status code: {}",
             docker_script_output.status
-        )
+        );
+        process::exit(1);
     }
 
     let mut installed = vec![];
@@ -153,6 +160,7 @@ fn log_summary(installed: Vec<String>, missing: Vec<String>) {
             println!("{}", cmd.replace("not installed", "").red());
         }
         println!("{summary}");
-        panic!("{} command(s) missing", missing.len());
+        eprintln!("{} command(s) missing", missing.len());
+        process::exit(1);
     }
 }
