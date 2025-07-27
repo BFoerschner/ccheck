@@ -1,7 +1,9 @@
-use anyhow::Result;
 use clap::Parser;
 use colored::*;
-use std::{fs, process::Command};
+use std::{
+    fs,
+    process::{Command, Output},
+};
 
 #[derive(Parser)]
 #[command(about = "Check if commands are installed inside a Docker Image")]
@@ -14,42 +16,13 @@ struct Args {
     shell: String,
 }
 
-fn main() -> Result<()> {
+fn main() {
     let args = Args::parse();
-
-    let commands = match args.file {
-        Some(path) => match fs::read_to_string(path) {
-            Ok(contents) => contents
-                .lines()
-                // filter out comments and empty lines
-                .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
-                .map(|l| l.trim().to_string())
-                .collect(),
-            Err(err) => {
-                eprintln!("{err}");
-                anyhow::bail!("Failed to read file");
-            }
-        },
-        None => args.commands,
-    };
-
-    if commands.is_empty() {
-        anyhow::bail!("No commands specified");
-    }
+    let commands = parse_commands(args.file, args.commands);
 
     println!("Checking Docker image: {}", args.image.to_string().yellow());
-    println!(
-        "Checking {} command(s):\n",
-        commands.len().to_string().yellow()
-    );
 
-    // create a joint script to run all commands at once in the container
-    let script_body = commands
-        .iter()
-        .map(|cmd| create_availability_check_script(&args.shell, cmd))
-        .collect::<Vec<_>>()
-        .join("\n");
-
+    let script_body = generate_script_body(&args.shell, commands);
     let script = match args.shell.as_str() {
         "nu" | "nushell" => script_body,
         _ => format!("#!/bin/sh\n{script_body}"),
@@ -61,50 +34,86 @@ fn main() -> Result<()> {
         .output();
 
     match docker_script_output {
-        Ok(output) => {
-            let mut installed = vec![];
-            let mut missing = vec![];
-
-            for line in String::from_utf8_lossy(&output.stdout).lines() {
-                let line = line.trim();
-                if line.contains("not installed") {
-                    missing.push(line.to_string());
-                } else if line.contains("installed") {
-                    installed.push(line.to_string());
-                } else if !line.is_empty() {
-                    eprintln!("{line}");
-                }
-            }
-            create_summary(installed, missing)
-        }
-        Err(err) => {
-            println!("{err}");
-            anyhow::bail!("Failed to run script in container");
-        }
+        Ok(output) => handle_docker_output(output),
+        Err(err) => panic!("Failed to run Docker script: {err}"),
     }
 }
 
-fn create_availability_check_script(shell: &str, cmd: &str) -> String {
-    let nu_script = r#"
-        if (try { which {cmd} } catch { null }) != null {
-            print "{cmd} installed"
-        } else {
-            print "{cmd} not installed"
-        }
-    "#;
+fn generate_script_body(shell: &str, commands: Vec<String>) -> String {
+    let script_body = commands
+        .iter()
+        .map(|cmd| create_availability_check_script(shell, cmd))
+        .collect::<Vec<_>>()
+        .join("\n");
+    script_body
+}
 
-    let posix_script = r#"
+fn parse_commands(command_file_path: Option<String>, args_commands: Vec<String>) -> Vec<String> {
+    match command_file_path {
+        Some(path) => match fs::read_to_string(path) {
+            Ok(contents) => create_commands_string(contents),
+            Err(err) => panic!("Failed to read file: {err}"),
+        },
+        None => args_commands,
+    }
+}
+
+fn create_commands_string(contents: String) -> Vec<String> {
+    contents
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+        .map(|l| l.trim().to_string())
+        .collect()
+}
+
+fn handle_docker_output(docker_script_output: Output) {
+    if !docker_script_output.status.success() {
+        panic!(
+            "Docker script failed with status code: {}",
+            docker_script_output.status
+        )
+    }
+
+    let mut installed = vec![];
+    let mut missing = vec![];
+    for line in String::from_utf8_lossy(&docker_script_output.stdout).lines() {
+        let line = line.trim();
+        if line.contains("not installed") {
+            missing.push(line.to_string());
+        } else if line.contains("installed") {
+            installed.push(line.to_string());
+        }
+    }
+    log_summary(installed, missing)
+}
+
+fn create_availability_check_script(shell: &str, cmd: &str) -> String {
+    match shell {
+        "nu" | "nushell" => get_nu_script(cmd),
+        _ => get_posix_script(cmd),
+    }
+    .replace("{cmd}", cmd)
+}
+
+fn get_posix_script(cmd: &str) -> String {
+    r#"
         if command -v "{cmd}" >/dev/null 2>&1; then
             echo "{cmd} installed"
         else
             echo "{cmd} not installed"
         fi
-    "#;
+    "#
+    .replace("{cmd}", cmd)
+}
 
-    match shell {
-        "nu" | "nushell" => nu_script,
-        _ => posix_script,
-    }
+fn get_nu_script(cmd: &str) -> String {
+    r#"
+        if (try { which {cmd} } catch { null }) != null {
+            print "{cmd} installed"
+        } else {
+            print "{cmd} not installed"
+        }
+    "#
     .replace("{cmd}", cmd)
 }
 
@@ -114,7 +123,7 @@ fn build_docker_cmd(image: &str, shell: &str) -> Command {
         .arg("run")
         .arg("--rm")
         .arg("--entrypoint=")
-        .arg(image) 
+        .arg(image)
         .arg(shell);
 
     if shell == "zsh" {
@@ -124,7 +133,7 @@ fn build_docker_cmd(image: &str, shell: &str) -> Command {
     docker_cmd
 }
 
-fn create_summary(installed: Vec<String>, missing: Vec<String>) -> Result<()> {
+fn log_summary(installed: Vec<String>, missing: Vec<String>) {
     let summary = format!(
         "\nSummary: {}/{} commands installed",
         installed.len(),
@@ -138,13 +147,12 @@ fn create_summary(installed: Vec<String>, missing: Vec<String>) -> Result<()> {
             println!("{}", cmd.green());
         }
         println!("{summary}");
-        Ok(())
     } else {
         println!("{}", "The following commands are missing:\n".red());
         for cmd in &missing {
             println!("{}", cmd.replace("not installed", "").red());
         }
         println!("{summary}");
-        anyhow::bail!("{} command(s) missing", missing.len());
+        panic!("{} command(s) missing", missing.len());
     }
 }
