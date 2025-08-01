@@ -1,10 +1,14 @@
 [package]
-license = "MIT"
-description = "CLI that verifies the presence of commands inside containers."
-repository = "https://github.com/bfoerschner/ccheck"
 name = "ccheck"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "CLI that verifies the presence of commands inside containers."
+repository = "https://github.com/bfoerschner/ccheck"
+homepage = "https://github.com/bfoerschner/ccheck"
+readme = "README.md"
+keywords = ["cli", "container", "command", "verification", "docker"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 clap = { version = "4.5.41", features = ["derive"] }
